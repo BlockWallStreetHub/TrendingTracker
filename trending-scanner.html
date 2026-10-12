@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trending Coin Scanner</title>
+<style>
+  :root { --bg:#0d0f14; --card:#161a22; --line:#262c38; --text:#e8eaf0; --mute:#8b93a7; --gold:#f5b73b; --up:#2ecc71; --down:#ff5c5c; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:15px/1.45 system-ui,Segoe UI,Arial,sans-serif; }
+  .wrap { max-width:1100px; margin:0 auto; padding:24px 16px 60px; }
+  h1 { margin:0 0 4px; font-size:26px; }
+  h1 span { color:var(--gold); }
+  .sub { color:var(--mute); margin:0 0 18px; }
+  .bar { display:flex; flex-wrap:wrap; gap:10px; align-items:center; margin-bottom:14px; }
+  button, select, input { background:var(--card); color:var(--text); border:1px solid var(--line); border-radius:8px; padding:9px 12px; font:inherit; }
+  button { cursor:pointer; }
+  button.primary { background:var(--gold); color:#1a1300; border-color:var(--gold); font-weight:700; }
+  button:disabled { opacity:.5; cursor:wait; }
+  input[type=number] { width:110px; }
+  label { color:var(--mute); font-size:13px; display:flex; gap:6px; align-items:center; }
+  .status { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; font-size:13px; }
+  .pill { padding:4px 10px; border-radius:99px; border:1px solid var(--line); color:var(--mute); }
+  .pill.ok { color:var(--up); border-color:#1f5c3a; }
+  .pill.bad { color:var(--down); border-color:#6b2a2a; }
+  .tablebox { background:var(--card); border:1px solid var(--line); border-radius:12px; overflow-x:auto; }
+  table { width:100%; border-collapse:collapse; min-width:820px; }
+  th, td { padding:11px 12px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--mute); font-weight:600; font-size:12px; text-transform:uppercase; letter-spacing:.04em; }
+  th:nth-child(1), td:nth-child(1), th:nth-child(2), td:nth-child(2) { text-align:left; }
+  tr:last-child td { border-bottom:none; }
+  .rank { color:var(--gold); font-weight:700; width:34px; }
+  .sym { font-weight:700; }
+  .name { color:var(--mute); font-size:12px; max-width:170px; overflow:hidden; text-overflow:ellipsis; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  .chip { display:inline-block; font-size:11px; padding:2px 7px; margin-left:4px; border-radius:6px; background:#222a39; color:#b9c2d8; }
+  .score { font-weight:700; color:var(--gold); }
+  a { color:var(--gold); text-decoration:none; } a:hover { text-decoration:underline; }
+  .note { color:var(--mute); font-size:12.5px; margin-top:16px; }
+  .empty { padding:40px; text-align:center; color:var(--mute); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Trending Coin <span>Scanner</span></h1>
+  <p class="sub">Merges trending data from GeckoTerminal and DexScreener, then ranks the top 10 tokens. Rescans automatically every 10 minutes.</p>
+
+  <div class="bar">
+    <button class="primary" id="go">Scan now</button>
+    <label>Chain
+      <select id="chain">
+        <option value="all">All chains</option>
+        <option value="solana">Solana</option>
+        <option value="ethereum">Ethereum</option>
+        <option value="base">Base</option>
+        <option value="bsc">BNB Chain</option>
+        <option value="arbitrum">Arbitrum</option>
+        <option value="robinhood">Robinhood Chain</option>
+      </select>
+    </label>
+    <label>Min liquidity $ <input type="number" id="minliq" value="20000" min="0" step="5000"></label>
+    <label><input type="checkbox" id="auto" checked> Auto-scan every 10 min</label>
+    <button id="csv">Download CSV</button>
+  </div>
+
+  <div class="status" id="status"></div>
+
+  <div class="tablebox">
+    <table>
+      <thead><tr>
+        <th>#</th><th>Token</th><th>Price</th><th>1h</th><th>24h</th><th>24h Volume</th><th>Liquidity</th><th>FDV</th><th>Score</th>
+      </tr></thead>
+      <tbody id="rows"><tr><td colspan="9" class="empty">Starting scan…</td></tr></tbody>
+    </table>
+  </div>
+
+  <p class="note" id="updated"></p>
+  <p class="note">Trending does not mean safe. New tokens are often scams or get rugged, so check liquidity, holders and the contract before buying anything. This tool is for research only and is not financial advice.</p>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const GT = 'https://api.geckoterminal.com/api/v2';
+const DS = 'https://api.dexscreener.com';
+
+// GeckoTerminal network ids -> DexScreener chain ids
+const NET_MAP = { eth:'ethereum', bsc:'bsc', base:'base', solana:'solana', arbitrum:'arbitrum',
+  polygon_pos:'polygon', avax:'avalanche', optimism:'optimism', ton:'ton', sui:'sui' };
+
+let lastTop = [];
+let timer = null;
+const INTERVAL_MS = 10 * 60 * 1000;   // scan every 10 minutes
+let nextScanAt = 0, lastScan = '';
+function tick() {
+  let t = lastScan ? 'Last scan: ' + lastScan : '';
+  if ($('auto').checked && nextScanAt) {
+    const left = Math.max(0, Math.round((nextScanAt - Date.now()) / 1000));
+    t += ` · Next scan in ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')} (keep this tab open)`;
+  } else if (lastScan) t += ' · Auto-scan is off';
+  $('updated').textContent = t;
+}
+setInterval(tick, 1000);
+
+async function getJSON(url) {
+  const r = await fetch(url, { headers: { 'Accept': 'application/json' } });
+  if (!r.ok) throw new Error('HTTP ' + r.status);
+  return r.json();
+}
+const num = v => { const n = parseFloat(v); return isFinite(n) ? n : 0; };
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+// ---------- Sources ----------
+async function srcGeckoTrending() {
+  const j = await getJSON(GT + '/networks/trending_pools?page=1');
+  return parseGT(j, 'GT Trending');
+}
+async function srcGeckoSolana() {
+  const j = await getJSON(GT + '/networks/solana/trending_pools?page=1');
+  return parseGT(j, 'GT Solana');
+}
+function parseGT(j, label) {
+  return (j.data || []).map((p, i) => {
+    const a = p.attributes || {};
+    const rel = p.relationships || {};
+    const netId = rel.network?.data?.id || '';
+    const baseId = rel.base_token?.data?.id || '';
+    const chain = NET_MAP[netId] || netId;
+    const address = baseId.includes('_') ? baseId.split('_').slice(1).join('_') : baseId;
+    const sym = (a.name || '').split(' / ')[0].trim();
+    return {
+      source: label, rank: i + 1, chain, address, symbol: sym, name: sym,
+      price: num(a.base_token_price_usd),
+      ch1h: num(a.price_change_percentage?.h1),
+      ch24h: num(a.price_change_percentage?.h24),
+      vol24: num(a.volume_usd?.h24),
+      liq: num(a.reserve_in_usd),
+      fdv: num(a.fdv_usd || a.market_cap_usd),
+      url: !address ? null : NET_MAP[netId]
+        ? `https://dexscreener.com/${chain}/${a.address}`
+        : `https://www.geckoterminal.com/${netId}/pools/${a.address}`
+    };
+  });
+}
+
+let rhNetId = null;
+async function findRobinhoodNetwork() {
+  if (rhNetId) return rhNetId;
+  for (let page = 1; page <= 12; page++) {
+    const j = await getJSON(GT + '/networks?page=' + page);
+    const list = j.data || [];
+    if (!list.length) break;
+    const hit = list.find(n => /robinhood/i.test(n.id) || /robinhood/i.test(n.attributes?.name || ''));
+    if (hit) { rhNetId = hit.id; return rhNetId; }
+    if (list.length < 20) break;
+  }
+  throw new Error('Robinhood Chain not listed on GeckoTerminal');
+}
+async function srcGeckoRobinhood() {
+  const id = await findRobinhoodNetwork();
+  const j = await getJSON(GT + '/networks/' + encodeURIComponent(id) + '/trending_pools?page=1');
+  return parseGT(j, 'GT Robinhood');
+}
+
+async function srcDexBoosts() {
+  const [top, latest] = await Promise.all([
+    getJSON(DS + '/token-boosts/top/v1'),
+    getJSON(DS + '/token-boosts/latest/v1').catch(() => [])
+  ]);
+  const seen = new Set(), items = [];
+  [['DS Top Boosted', top], ['DS Latest Boosted', latest]].forEach(([label, arr]) => {
+    (arr || []).forEach((t, i) => {
+      if (!t.chainId || !t.tokenAddress) return;
+      items.push({ label, rank: i + 1, chain: t.chainId, address: t.tokenAddress });
+    });
+  });
+  // enrich with market data, grouped per chain (30 addresses max per call)
+  const byChain = {};
+  items.forEach(it => { (byChain[it.chain] ||= new Set()).add(it.address); });
+  const best = {}; // chain:address -> best pair by liquidity
+  for (const [chain, set] of Object.entries(byChain)) {
+    const addrs = [...set];
+    for (let i = 0; i < addrs.length; i += 30) {
+      const chunk = addrs.slice(i, i + 30).join(',');
+      try {
+        const pairs = await getJSON(`${DS}/tokens/v1/${chain}/${chunk}`);
+        (pairs || []).forEach(p => {
+          const k = chain + ':' + (p.baseToken?.address || '').toLowerCase();
+          const liq = num(p.liquidity?.usd);
+          if (!best[k] || liq > num(best[k].liquidity?.usd)) best[k] = p;
+        });
+      } catch (e) { /* skip chunk */ }
+    }
+  }
+  const out = [];
+  items.forEach(it => {
+    const p = best[it.chain + ':' + it.address.toLowerCase()];
+    if (!p) return;
+    out.push({
+      source: it.label, rank: it.rank, chain: it.chain, address: it.address,
+      symbol: p.baseToken?.symbol || '?', name: p.baseToken?.name || '',
+      price: num(p.priceUsd), ch1h: num(p.priceChange?.h1), ch24h: num(p.priceChange?.h24),
+      vol24: num(p.volume?.h24), liq: num(p.liquidity?.usd), fdv: num(p.fdv || p.marketCap),
+      url: p.url
+    });
+  });
+  return out;
+}
+
+const SOURCES = [
+  ['GeckoTerminal trending', srcGeckoTrending],
+  ['GeckoTerminal Solana', srcGeckoSolana],
+  ['GeckoTerminal Robinhood', srcGeckoRobinhood],
+  ['DexScreener boosts', srcDexBoosts]
+];
+
+// ---------- Merge + score ----------
+function merge(all) {
+  const map = new Map();
+  all.forEach(r => {
+    if (!r.address) return;
+    const k = r.chain + ':' + r.address.toLowerCase();
+    let t = map.get(k);
+    if (!t) { t = { ...r, sources: new Map() }; map.set(k, t); }
+    // keep the entry with the most liquidity as the display data
+    if (r.liq > t.liq) Object.assign(t, { price:r.price, ch1h:r.ch1h, ch24h:r.ch24h, vol24:r.vol24, liq:r.liq, fdv:r.fdv, url:r.url || t.url });
+    if (!t.sources.has(r.source) || r.rank < t.sources.get(r.source)) t.sources.set(r.source, r.rank);
+  });
+  return [...map.values()];
+}
+const clamp = (v, lo, hi) => Math.min(Math.max(v, lo), hi);
+function score(t) {
+  let s = 0;
+  s += 25 * t.sources.size;                                   // appears on more lists
+  t.sources.forEach(rank => { s += clamp(21 - rank, 0, 20) / 20 * 8; }); // high list position
+  s += clamp(t.ch24h, 0, 200) / 200 * 15;                     // 24h momentum
+  s += clamp(t.ch1h, 0, 50) / 50 * 12;                        // 1h momentum
+  s += clamp(Math.log10(t.vol24 + 1) / 8, 0, 1) * 15;         // volume
+  s += clamp(Math.log10(t.liq + 1) / 7, 0, 1) * 10;           // liquidity depth
+  return s;
+}
+
+// ---------- Render ----------
+const fmtUsd = n => !n ? '-' : n >= 1e9 ? '$' + (n/1e9).toFixed(2) + 'B' : n >= 1e6 ? '$' + (n/1e6).toFixed(2) + 'M' : n >= 1e3 ? '$' + (n/1e3).toFixed(1) + 'K' : '$' + n.toFixed(0);
+const fmtPrice = p => !p ? '-' : p >= 1 ? '$' + p.toFixed(2) : p >= 0.01 ? '$' + p.toFixed(4) : '$' + p.toPrecision(3);
+const fmtPct = v => `<span class="${v >= 0 ? 'up' : 'down'}">${v >= 0 ? '+' : ''}${v.toFixed(1)}%</span>`;
+
+function render(top) {
+  lastTop = top;
+  if (!top.length) { $('rows').innerHTML = '<tr><td colspan="9" class="empty">No tokens matched your filters. Try lowering the minimum liquidity or choosing All chains.</td></tr>'; return; }
+  $('rows').innerHTML = top.map((t, i) => {
+    const chips = [...t.sources.keys()].map(s => `<span class="chip">${esc(s)}</span>`).join('');
+    const link = t.url ? `<a href="${esc(t.url)}" target="_blank" rel="noopener">${esc(t.symbol)}</a>` : esc(t.symbol);
+    return `<tr>
+      <td class="rank">${i + 1}</td>
+      <td><span class="sym">${link}</span> <span class="chip">${esc(t.chain)}</span><div class="name">${esc(t.name)}</div><div>${chips}</div></td>
+      <td>${fmtPrice(t.price)}</td><td>${fmtPct(t.ch1h)}</td><td>${fmtPct(t.ch24h)}</td>
+      <td>${fmtUsd(t.vol24)}</td><td>${fmtUsd(t.liq)}</td><td>${fmtUsd(t.fdv)}</td>
+      <td class="score">${t.score.toFixed(0)}</td></tr>`;
+  }).join('');
+}
+
+async function scan() {
+  $('go').disabled = true; $('go').textContent = 'Scanning…';
+  const status = [];
+  const results = await Promise.all(SOURCES.map(async ([label, fn]) => {
+    try { const r = await fn(); status.push(`<span class="pill ok">${label}: ${r.length} tokens</span>`); return r; }
+    catch (e) { status.push(`<span class="pill bad">${label}: failed (${esc(e.message)})</span>`); return []; }
+  }));
+  $('status').innerHTML = status.join('');
+
+  const chain = $('chain').value, minLiq = num($('minliq').value);
+  let merged = merge(results.flat())
+    .filter(t => t.liq >= minLiq && (chain === 'all' || (chain === 'robinhood' ? /robinhood/i.test(t.chain) : t.chain === chain)));
+  merged.forEach(t => t.score = score(t));
+  merged.sort((a, b) => b.score - a.score);
+  render(merged.slice(0, 10));
+  lastScan = new Date().toLocaleTimeString();
+  nextScanAt = $('auto').checked ? Date.now() + INTERVAL_MS : 0;
+  tick();
+  $('go').disabled = false; $('go').textContent = 'Scan now';
+}
+
+function downloadCSV() {
+  if (!lastTop.length) return;
+  const head = ['rank','symbol','name','chain','address','price','change_1h','change_24h','volume_24h','liquidity','fdv','score','sources'];
+  const q = v => '"' + String(v).replace(/"/g, '""') + '"';
+  const rows = lastTop.map((t, i) => [i+1, t.symbol, t.name, t.chain, t.address, t.price, t.ch1h, t.ch24h, t.vol24, t.liq, t.fdv, t.score.toFixed(1), [...t.sources.keys()].join('; ')].map(q).join(','));
+  const blob = new Blob([[head.join(','), ...rows].join('\n')], { type: 'text/csv' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'trending-top10-' + new Date().toISOString().slice(0, 16).replace(/[:T]/g, '-') + '.csv';
+  a.click();
+}
+
+function setAuto() {
+  clearInterval(timer);
+  if ($('auto').checked) { timer = setInterval(scan, INTERVAL_MS); nextScanAt = Date.now() + INTERVAL_MS; }
+  else nextScanAt = 0;
+  tick();
+}
+
+$('go').onclick = scan;
+$('csv').onclick = downloadCSV;
+$('auto').onchange = setAuto;
+$('chain').onchange = scan;
+$('minliq').onchange = scan;
+setAuto();
+scan();
+</script>
+</body>
+</html>
